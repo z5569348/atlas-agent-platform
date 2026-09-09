@@ -2,6 +2,7 @@ from fastapi import FastAPI
 
 from atlas_agent_platform.core.config import get_settings
 from atlas_agent_platform.routes.health import router as health_router
+from atlas_agent_platform.routes.llm import router as llm_router
 
 settings = get_settings()
 
@@ -12,6 +13,7 @@ app = FastAPI(
 )
 
 app.include_router(health_router)
+app.include_router(llm_router)
 
 
 @app.get("/")
