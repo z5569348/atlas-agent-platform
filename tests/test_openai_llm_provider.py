@@ -1,9 +1,14 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx2
 import pytest
+from openai import RateLimitError
 from pydantic import SecretStr
 
+from atlas_agent_platform.llm.exceptions import (
+    LLMQuotaExceededError,
+)
 from atlas_agent_platform.llm.providers.openai import (
     OpenAILLMProvider,
 )
@@ -76,3 +81,47 @@ async def test_openai_provider_generates_response(
     assert result.usage.input_tokens == 8
     assert result.usage.output_tokens == 3
     assert result.latency_ms >= 0
+
+
+@pytest.mark.anyio
+async def test_openai_provider_maps_quota_error(
+    provider: OpenAILLMProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = httpx2.Request(
+        "POST",
+        "https://api.openai.com/v1/responses",
+    )
+    response = httpx2.Response(
+        status_code=429,
+        request=request,
+    )
+    sdk_error = RateLimitError(
+        "Quota exhausted.",
+        response=response,
+        body={
+            "type": "insufficient_quota",
+            "code": "credit_balance_exhausted",
+        },
+    )
+
+    monkeypatch.setattr(
+        provider._client.responses,
+        "create",
+        AsyncMock(side_effect=sdk_error),
+    )
+
+    llm_request = LLMRequest(
+        messages=[
+            ChatMessage(role="user", content="Hello"),
+        ]
+    )
+
+    with pytest.raises(LLMQuotaExceededError) as error_info:
+        await provider.generate(llm_request)
+
+    error = error_info.value
+    assert error.provider == "openai"
+    assert error.code == "llm_quota_exceeded"
+    assert error.retryable is False
+    assert error.__cause__ is sdk_error

@@ -1,6 +1,15 @@
 from uuid import UUID
 
+from fastapi import status
 from fastapi.testclient import TestClient
+
+from atlas_agent_platform.llm.exceptions import (
+    LLMQuotaExceededError,
+)
+from atlas_agent_platform.llm.factory import get_llm_provider
+from atlas_agent_platform.llm.providers.base import LLMProvider
+from atlas_agent_platform.llm.schemas import LLMRequest, LLMResponse
+from atlas_agent_platform.main import app
 
 
 def test_generate_llm_response(client: TestClient) -> None:
@@ -27,7 +36,27 @@ def test_generate_llm_response(client: TestClient) -> None:
     assert payload["usage"]["output_tokens"] > 0
     assert payload["latency_ms"] >= 0
 
+class QuotaExceededProvider:
+    @property
+    def provider_name(self) -> str:
+        return "openai"
 
+    @property
+    def model_name(self) -> str:
+        return "test-model"
+
+    async def generate(
+        self,
+        _request: LLMRequest,
+    ) -> LLMResponse:
+        raise LLMQuotaExceededError(
+            "Model provider quota is exhausted.",
+            provider=self.provider_name,
+        )
+
+
+def get_quota_exceeded_provider() -> LLMProvider:
+    return QuotaExceededProvider()
 
 def test_generate_llm_rejects_empty_messages(client: TestClient) -> None:
     response = client.post(
@@ -36,3 +65,32 @@ def test_generate_llm_rejects_empty_messages(client: TestClient) -> None:
     )
 
     assert response.status_code == 422
+
+def test_generate_llm_handles_quota_error(
+    client: TestClient,
+) -> None:
+    app.dependency_overrides[get_llm_provider] = (
+        get_quota_exceeded_provider
+    )
+
+    response = client.post(
+        "/api/v1/llm/generate",
+        json={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Hello",
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+    assert response.json() == {
+        "error": {
+            "code": "llm_quota_exceeded",
+            "message": "Model provider quota is exhausted.",
+            "provider": "openai",
+            "retryable": False,
+        }
+    }

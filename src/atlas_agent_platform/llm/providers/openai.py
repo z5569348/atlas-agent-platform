@@ -1,6 +1,15 @@
 from time import perf_counter
 
-from openai import AsyncOpenAI
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AsyncOpenAI,
+    AuthenticationError,
+    BadRequestError,
+    PermissionDeniedError,
+    RateLimitError,
+)
 from openai.types.responses import (
     EasyInputMessageParam,
     Response,
@@ -8,6 +17,15 @@ from openai.types.responses import (
 )
 from pydantic import SecretStr
 
+from atlas_agent_platform.llm.exceptions import (
+    LLMAuthenticationError,
+    LLMConnectionError,
+    LLMInvalidRequestError,
+    LLMQuotaExceededError,
+    LLMRateLimitError,
+    LLMTimeoutError,
+    LLMUpstreamServiceError,
+)
 from atlas_agent_platform.llm.schemas import (
     FinishReason,
     LLMRequest,
@@ -47,9 +65,7 @@ class OpenAILLMProvider:
 
         for message in request.messages:
             if message.role == "tool":
-                raise ValueError(
-                    "Tool messages require tool call metadata."
-                )
+                raise ValueError("Tool messages require tool call metadata.")
 
             input_message: EasyInputMessageParam = {
                 "role": message.role,
@@ -71,16 +87,70 @@ class OpenAILLMProvider:
 
         return "length"
 
+    @staticmethod
+    def _is_quota_error(error: RateLimitError) -> bool:
+        quota_codes = {
+            "insufficient_quota",
+            "credit_balance_exhausted",
+        }
+
+        return error.code in quota_codes or error.type == "insufficient_quota"
+
     async def generate(self, request: LLMRequest) -> LLMResponse:
         started_at = perf_counter()
 
-        response = await self._client.responses.create(
-            model=self.model_name,
-            input=self._build_input(request),
-            ## temperature=request.temperature,
-            max_output_tokens=request.max_output_tokens,
-            store=False,
-        )
+        try:
+            response = await self._client.responses.create(
+                model=self.model_name,
+                input=self._build_input(request),
+                max_output_tokens=request.max_output_tokens,
+                store=False,
+            )
+        except (
+            AuthenticationError,
+            PermissionDeniedError,
+        ) as error:
+            raise LLMAuthenticationError(
+                "Model provider authentication failed.",
+                provider=self.provider_name,
+            ) from error
+        except RateLimitError as error:
+            if self._is_quota_error(error):
+                raise LLMQuotaExceededError(
+                    "Model provider quota is exhausted.",
+                    provider=self.provider_name,
+                ) from error
+
+            raise LLMRateLimitError(
+                "Model provider rate limit was exceeded.",
+                provider=self.provider_name,
+            ) from error
+        except BadRequestError as error:
+            raise LLMInvalidRequestError(
+                "Model provider rejected the request.",
+                provider=self.provider_name,
+            ) from error
+        except APITimeoutError as error:
+            raise LLMTimeoutError(
+                "Model provider request timed out.",
+                provider=self.provider_name,
+            ) from error
+        except APIConnectionError as error:
+            raise LLMConnectionError(
+                "Could not connect to model provider.",
+                provider=self.provider_name,
+            ) from error
+        except APIStatusError as error:
+            if error.status_code >= 500:
+                raise LLMUpstreamServiceError(
+                    "Model provider service is unavailable.",
+                    provider=self.provider_name,
+                ) from error
+
+            raise LLMInvalidRequestError(
+                "Model provider returned an API error.",
+                provider=self.provider_name,
+            ) from error
 
         latency_ms = (perf_counter() - started_at) * 1000
         usage = response.usage
@@ -91,12 +161,8 @@ class OpenAILLMProvider:
             content=response.output_text,
             finish_reason=self._get_finish_reason(response),
             usage=TokenUsage(
-                input_tokens=(
-                    usage.input_tokens if usage is not None else 0
-                ),
-                output_tokens=(
-                    usage.output_tokens if usage is not None else 0
-                ),
+                input_tokens=(usage.input_tokens if usage is not None else 0),
+                output_tokens=(usage.output_tokens if usage is not None else 0),
             ),
             latency_ms=latency_ms,
         )
