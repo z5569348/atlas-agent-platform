@@ -1,17 +1,28 @@
 from time import perf_counter
 
+from atlas_agent_platform.llm.capabilities import ModelCapabilities
 from atlas_agent_platform.llm.schemas import LLMRequest, LLMResponse, TokenUsage
 
 
 class MockLLMProvider:
-    def __init__(self, model_name: str = "mock-model") -> None:
+    def __init__(
+        self,
+        model_name: str = "mock-model",
+        capabilities: ModelCapabilities | None = None,
+    ) -> None:
         self._model_name = model_name
+        self._capabilities = capabilities or ModelCapabilities(
+            max_output_tokens=32_768,
+        )
     @property
     def provider_name(self) -> str:
         return "mock"
     @property
     def model_name(self) -> str:
         return self._model_name
+    @property
+    def capabilities(self) -> ModelCapabilities:
+        return self._capabilities
     @staticmethod
     def _estimate_tokens(text: str) -> int:
         return max(1, (len(text) + 3) // 4)

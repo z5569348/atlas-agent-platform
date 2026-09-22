@@ -42,3 +42,4 @@ class LLMResponse(BaseModel):
     finish_reason: FinishReason
     usage: TokenUsage
     latency_ms: float = Field(ge=0.0)
+    warnings: list[str] = Field(default_factory=list)
