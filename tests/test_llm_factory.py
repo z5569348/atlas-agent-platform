@@ -24,7 +24,7 @@ def test_factory_creates_mock_provider() -> None:
 def test_factory_creates_openai_provider() -> None:
     settings = Settings(
         llm_provider="openai",
-        llm_model="factory-openai-model",
+        llm_model="gpt-5.6-luna",
         llm_api_key=SecretStr("test-api-key"),
         llm_base_url=None,
     )
@@ -33,7 +33,8 @@ def test_factory_creates_openai_provider() -> None:
 
     assert isinstance(provider, OpenAILLMProvider)
     assert provider.provider_name == "openai"
-    assert provider.model_name == "factory-openai-model"
+    assert provider.model_name == "gpt-5.6-luna"
+    assert provider.capabilities.supports_temperature is False
 
 def test_factory_rejects_unimplemented_provider() -> None:
     settings = Settings(llm_provider="qwen")

@@ -6,6 +6,7 @@ import pytest
 from openai import RateLimitError
 from pydantic import SecretStr
 
+from atlas_agent_platform.llm.capabilities import ModelCapabilities
 from atlas_agent_platform.llm.exceptions import (
     LLMQuotaExceededError,
 )
@@ -27,6 +28,9 @@ def provider() -> OpenAILLMProvider:
     return OpenAILLMProvider(
         api_key=SecretStr("test-api-key"),
         model_name="test-model",
+        capabilities=ModelCapabilities(
+            max_output_tokens=128_000,
+        ),
     )
 
 @pytest.mark.anyio
@@ -69,7 +73,6 @@ async def test_openai_provider_generates_response(
                 "content": "Hello",
             }
         ],
-        ## temperature=0.2,
         max_output_tokens=128,
         store=False,
     )
@@ -82,6 +85,57 @@ async def test_openai_provider_generates_response(
     assert result.usage.output_tokens == 3
     assert result.latency_ms >= 0
 
+@pytest.mark.anyio
+async def test_openai_provider_sends_supported_temperature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAILLMProvider(
+        api_key=SecretStr("test-api-key"),
+        model_name="temperature-model",
+        capabilities=ModelCapabilities(
+            supports_temperature=True,
+            max_output_tokens=128_000,
+        ),
+    )
+    sdk_response = SimpleNamespace(
+        model="temperature-model",
+        output_text="Generated answer",
+        incomplete_details=None,
+        usage=SimpleNamespace(
+            input_tokens=8,
+            output_tokens=3,
+        ),
+    )
+    create_response = AsyncMock(return_value=sdk_response)
+
+    monkeypatch.setattr(
+        provider._client.responses,
+        "create",
+        create_response,
+    )
+
+    request = LLMRequest(
+        messages=[
+            ChatMessage(role="user", content="Hello"),
+        ],
+        temperature=0.7,
+        max_output_tokens=128,
+    )
+
+    await provider.generate(request)
+
+    create_response.assert_awaited_once_with(
+        model="temperature-model",
+        input=[
+            {
+                "role": "user",
+                "content": "Hello",
+            }
+        ],
+        max_output_tokens=128,
+        temperature=0.7,
+        store=False,
+    )
 
 @pytest.mark.anyio
 async def test_openai_provider_maps_quota_error(

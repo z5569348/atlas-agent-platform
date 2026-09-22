@@ -17,6 +17,7 @@ from openai.types.responses import (
 )
 from pydantic import SecretStr
 
+from atlas_agent_platform.llm.capabilities import ModelCapabilities
 from atlas_agent_platform.llm.exceptions import (
     LLMAuthenticationError,
     LLMConnectionError,
@@ -39,11 +40,13 @@ class OpenAILLMProvider:
         self,
         api_key: SecretStr,
         model_name: str,
+        capabilities: ModelCapabilities,
         base_url: str | None = None,
         timeout_seconds: float = 30.0,
         max_retries: int = 2,
     ) -> None:
         self._model_name = model_name
+        self._capabilities = capabilities
         self._client = AsyncOpenAI(
             api_key=api_key.get_secret_value(),
             base_url=base_url,
@@ -58,6 +61,10 @@ class OpenAILLMProvider:
     @property
     def model_name(self) -> str:
         return self._model_name
+
+    @property
+    def capabilities(self) -> ModelCapabilities:
+        return self._capabilities
 
     @staticmethod
     def _build_input(request: LLMRequest) -> ResponseInputParam:
@@ -100,12 +107,23 @@ class OpenAILLMProvider:
         started_at = perf_counter()
 
         try:
-            response = await self._client.responses.create(
-                model=self.model_name,
-                input=self._build_input(request),
-                max_output_tokens=request.max_output_tokens,
-                store=False,
-            )
+            input_messages = self._build_input(request)
+
+            if self.capabilities.supports_temperature:
+                response = await self._client.responses.create(
+                    model=self.model_name,
+                    input=input_messages,
+                    max_output_tokens=request.max_output_tokens,
+                    temperature=request.temperature,
+                    store=False,
+                )
+            else:
+                response = await self._client.responses.create(
+                    model=self.model_name,
+                    input=input_messages,
+                    max_output_tokens=request.max_output_tokens,
+                    store=False,
+                )
         except (
             AuthenticationError,
             PermissionDeniedError,

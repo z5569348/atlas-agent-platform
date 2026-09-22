@@ -1,6 +1,7 @@
 from functools import lru_cache
 
 from atlas_agent_platform.core.config import Settings, get_settings
+from atlas_agent_platform.llm.capabilities import get_model_profile
 from atlas_agent_platform.llm.providers.base import LLMProvider
 from atlas_agent_platform.llm.providers.mock import MockLLMProvider
 from atlas_agent_platform.llm.providers.openai import (
@@ -18,6 +19,11 @@ def create_llm_provider(settings: Settings) -> LLMProvider:
                 "ATLAS_LLM_API_KEY is required for OpenAI."
             )
 
+        profile = get_model_profile(
+            settings.llm_provider,
+            settings.llm_model,
+        )
+
         base_url = (
             str(settings.llm_base_url)
             if settings.llm_base_url is not None
@@ -27,6 +33,7 @@ def create_llm_provider(settings: Settings) -> LLMProvider:
         return OpenAILLMProvider(
             api_key=settings.llm_api_key,
             model_name=settings.llm_model,
+            capabilities=profile.capabilities,
             base_url=base_url,
             timeout_seconds=settings.llm_timeout_seconds,
             max_retries=settings.llm_max_retries,
