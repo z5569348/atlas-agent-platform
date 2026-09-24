@@ -78,3 +78,60 @@ def test_llm_response_rejects_negative_token_usage() -> None:
                 "latency_ms": 1.5,
             }
         )
+
+def test_llm_request_accepts_tool_definitions() -> None:
+    request = LLMRequest.model_validate(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Calculate 6 times 7.",
+                }
+            ],
+            "tools": [
+                {
+                    "name": "calculator",
+                    "description": "Perform arithmetic.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                }
+            ],
+        }
+    )
+
+    assert len(request.tools) == 1
+    assert request.tools[0].name == "calculator"
+
+def test_llm_response_accepts_tool_calls() -> None:
+    response = LLMResponse.model_validate(
+        {
+            "provider": "openai",
+            "model": "test-model",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_123",
+                    "name": "calculator",
+                    "arguments": {
+                        "operation": "multiply",
+                        "left": 6,
+                        "right": 7,
+                    },
+                }
+            ],
+            "finish_reason": "tool_call",
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5,
+            },
+            "latency_ms": 25.0,
+        }
+    )
+
+    assert response.content == ""
+    assert response.finish_reason == "tool_call"
+    assert len(response.tool_calls) == 1
+    assert response.tool_calls[0].id == "call_123"

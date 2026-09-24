@@ -1,3 +1,4 @@
+from json import JSONDecodeError
 from time import perf_counter
 
 from openai import (
@@ -13,9 +14,13 @@ from openai import (
 from openai.types.responses import (
     EasyInputMessageParam,
     Response,
+    ResponseFunctionToolCall,
     ResponseInputParam,
 )
-from pydantic import SecretStr
+from openai.types.responses.response_create_params import (
+    ResponseCreateParamsNonStreaming,
+)
+from pydantic import SecretStr, ValidationError
 
 from atlas_agent_platform.llm.capabilities import ModelCapabilities
 from atlas_agent_platform.llm.exceptions import (
@@ -26,6 +31,10 @@ from atlas_agent_platform.llm.exceptions import (
     LLMRateLimitError,
     LLMTimeoutError,
     LLMUpstreamServiceError,
+)
+from atlas_agent_platform.llm.providers.openai_tools import (
+    from_openai_function_call,
+    to_openai_function_tool,
 )
 from atlas_agent_platform.llm.schemas import (
     FinishReason,
@@ -108,22 +117,26 @@ class OpenAILLMProvider:
 
         try:
             input_messages = self._build_input(request)
+            request_params: ResponseCreateParamsNonStreaming = {
+                "model": self.model_name,
+                "input": input_messages,
+                "max_output_tokens": request.max_output_tokens,
+                "store": False,
+                "stream": False,
+            }
 
             if self.capabilities.supports_temperature:
-                response = await self._client.responses.create(
-                    model=self.model_name,
-                    input=input_messages,
-                    max_output_tokens=request.max_output_tokens,
-                    temperature=request.temperature,
-                    store=False,
-                )
-            else:
-                response = await self._client.responses.create(
-                    model=self.model_name,
-                    input=input_messages,
-                    max_output_tokens=request.max_output_tokens,
-                    store=False,
-                )
+                request_params["temperature"] = request.temperature
+
+            if request.tools:
+                request_params["tools"] = [
+                    to_openai_function_tool(definition)
+                    for definition in request.tools
+                ]
+
+            response = await self._client.responses.create(
+                **request_params
+            )
         except (
             AuthenticationError,
             PermissionDeniedError,
@@ -170,6 +183,26 @@ class OpenAILLMProvider:
                 provider=self.provider_name,
             ) from error
 
+        try:
+            tool_calls = [
+                from_openai_function_call(item)
+                for item in response.output
+                if isinstance(item, ResponseFunctionToolCall)
+            ]
+        except (
+            JSONDecodeError,
+            ValidationError,
+        ) as error:
+            raise LLMUpstreamServiceError(
+                "Model provider returned invalid tool arguments.",
+                provider=self.provider_name,
+            ) from error
+
+        finish_reason: FinishReason = (
+            "tool_call"
+            if tool_calls
+            else self._get_finish_reason(response)
+        )
         latency_ms = (perf_counter() - started_at) * 1000
         usage = response.usage
 
@@ -177,7 +210,8 @@ class OpenAILLMProvider:
             provider=self.provider_name,
             model=response.model,
             content=response.output_text,
-            finish_reason=self._get_finish_reason(response),
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
             usage=TokenUsage(
                 input_tokens=(usage.input_tokens if usage is not None else 0),
                 output_tokens=(usage.output_tokens if usage is not None else 0),

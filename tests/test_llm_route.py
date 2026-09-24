@@ -81,6 +81,44 @@ def test_generate_llm_rejects_empty_messages(client: TestClient) -> None:
 
     assert response.status_code == 422
 
+def test_generate_llm_rejects_tools_for_unsupported_model(
+    client: TestClient,
+) -> None:
+    response = client.post(
+        "/api/v1/llm/generate",
+        json={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Calculate 6 times 7.",
+                },
+            ],
+            "tools": [
+                {
+                    "name": "calculator",
+                    "description": "Perform arithmetic calculations.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {},
+                    },
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert response.json() == {
+        "error": {
+            "code": "llm_invalid_request",
+            "message": (
+                "Model mock/mock-model "
+                "does not support tool calling."
+            ),
+            "provider": "mock",
+            "retryable": False,
+        },
+    }
+
 def test_generate_llm_reports_adjusted_output_limit(
     client: TestClient,
 ) -> None:
