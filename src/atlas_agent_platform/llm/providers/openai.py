@@ -1,5 +1,8 @@
-from json import JSONDecodeError
+from collections.abc import Sequence
+from dataclasses import dataclass
+from json import JSONDecodeError, dumps
 from time import perf_counter
+from typing import cast
 
 from openai import (
     APIConnectionError,
@@ -32,6 +35,7 @@ from atlas_agent_platform.llm.exceptions import (
     LLMTimeoutError,
     LLMUpstreamServiceError,
 )
+from atlas_agent_platform.llm.providers.base import LLMProviderTurn
 from atlas_agent_platform.llm.providers.openai_tools import (
     from_openai_function_call,
     to_openai_function_tool,
@@ -42,6 +46,16 @@ from atlas_agent_platform.llm.schemas import (
     LLMResponse,
     TokenUsage,
 )
+from atlas_agent_platform.tools.schemas import ToolResult
+
+
+@dataclass(
+    frozen=True,
+    slots=True,
+)
+class OpenAITurnState:
+    request: LLMRequest
+    input_items: ResponseInputParam
 
 
 class OpenAILLMProvider:
@@ -91,6 +105,29 @@ class OpenAILLMProvider:
 
         return input_messages
 
+    def _build_request_params(
+        self,
+        request: LLMRequest,
+        input_items: ResponseInputParam,
+    ) -> ResponseCreateParamsNonStreaming:
+        request_params: ResponseCreateParamsNonStreaming = {
+            "model": self.model_name,
+            "input": input_items,
+            "max_output_tokens": request.max_output_tokens,
+            "store": False,
+            "stream": False,
+        }
+
+        if self.capabilities.supports_temperature:
+            request_params["temperature"] = request.temperature
+
+        if request.tools:
+            request_params["tools"] = [
+                to_openai_function_tool(definition) for definition in request.tools
+            ]
+
+        return request_params
+
     @staticmethod
     def _get_finish_reason(response: Response) -> FinishReason:
         details = response.incomplete_details
@@ -112,31 +149,61 @@ class OpenAILLMProvider:
 
         return error.code in quota_codes or error.type == "insufficient_quota"
 
-    async def generate(self, request: LLMRequest) -> LLMResponse:
-        started_at = perf_counter()
+    def _to_llm_response(
+        self,
+        response: Response,
+        started_at: float,
+    ) -> LLMResponse:
+        try:
+            tool_calls = [
+                from_openai_function_call(item)
+                for item in response.output
+                if isinstance(
+                    item,
+                    ResponseFunctionToolCall,
+                )
+            ]
+        except (
+            JSONDecodeError,
+            ValidationError,
+        ) as error:
+            raise LLMUpstreamServiceError(
+                "Model provider returned invalid tool arguments.",
+                provider=self.provider_name,
+            ) from error
+
+        finish_reason: FinishReason = (
+            "tool_call" if tool_calls else self._get_finish_reason(response)
+        )
+        latency_ms = (perf_counter() - started_at) * 1000
+        usage = response.usage
+
+        return LLMResponse(
+            provider=self.provider_name,
+            model=response.model,
+            content=response.output_text,
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
+            usage=TokenUsage(
+                input_tokens=(usage.input_tokens if usage is not None else 0),
+                output_tokens=(usage.output_tokens if usage is not None else 0),
+            ),
+            latency_ms=latency_ms,
+        )
+
+    async def _request_response(
+        self,
+        request: LLMRequest,
+        input_items: ResponseInputParam,
+    ) -> Response:
 
         try:
-            input_messages = self._build_input(request)
-            request_params: ResponseCreateParamsNonStreaming = {
-                "model": self.model_name,
-                "input": input_messages,
-                "max_output_tokens": request.max_output_tokens,
-                "store": False,
-                "stream": False,
-            }
-
-            if self.capabilities.supports_temperature:
-                request_params["temperature"] = request.temperature
-
-            if request.tools:
-                request_params["tools"] = [
-                    to_openai_function_tool(definition)
-                    for definition in request.tools
-                ]
-
-            response = await self._client.responses.create(
-                **request_params
+            request_params = self._build_request_params(
+                request,
+                input_items,
             )
+
+            response = await self._client.responses.create(**request_params)
         except (
             AuthenticationError,
             PermissionDeniedError,
@@ -183,38 +250,93 @@ class OpenAILLMProvider:
                 provider=self.provider_name,
             ) from error
 
-        try:
-            tool_calls = [
-                from_openai_function_call(item)
-                for item in response.output
-                if isinstance(item, ResponseFunctionToolCall)
-            ]
-        except (
-            JSONDecodeError,
-            ValidationError,
-        ) as error:
-            raise LLMUpstreamServiceError(
-                "Model provider returned invalid tool arguments.",
-                provider=self.provider_name,
-            ) from error
+        return response
 
-        finish_reason: FinishReason = (
-            "tool_call"
-            if tool_calls
-            else self._get_finish_reason(response)
+    async def _create_turn(
+        self,
+        request: LLMRequest,
+        input_items: ResponseInputParam,
+    ) -> LLMProviderTurn:
+        started_at = perf_counter()
+        response = await self._request_response(
+            request,
+            input_items,
         )
-        latency_ms = (perf_counter() - started_at) * 1000
-        usage = response.usage
+        llm_response = self._to_llm_response(
+            response,
+            started_at,
+        )
+        replay_items = cast(
+            ResponseInputParam,
+            [
+                *input_items,
+                *response.output,
+            ],
+        )
 
-        return LLMResponse(
-            provider=self.provider_name,
-            model=response.model,
-            content=response.output_text,
-            tool_calls=tool_calls,
-            finish_reason=finish_reason,
-            usage=TokenUsage(
-                input_tokens=(usage.input_tokens if usage is not None else 0),
-                output_tokens=(usage.output_tokens if usage is not None else 0),
+        return LLMProviderTurn(
+            response=llm_response,
+            state=OpenAITurnState(
+                request=request,
+                input_items=replay_items,
             ),
-            latency_ms=latency_ms,
         )
+
+    async def start_turn(
+        self,
+        request: LLMRequest,
+    ) -> LLMProviderTurn:
+        input_items = self._build_input(request)
+        return await self._create_turn(
+            request,
+            input_items,
+        )
+
+    async def continue_turn(
+        self,
+        turn: LLMProviderTurn,
+        tool_results: Sequence[ToolResult],
+    ) -> LLMProviderTurn:
+        if not isinstance(turn.state, OpenAITurnState):
+            raise TypeError("Expected OpenAITurnState.")
+
+        expected_ids = [call.id for call in turn.response.tool_calls]
+        result_ids = [result.tool_call_id for result in tool_results]
+
+        if not expected_ids:
+            raise ValueError("Cannot continue a turn without tool calls.")
+
+        if len(result_ids) != len(set(result_ids)) or set(result_ids) != set(expected_ids):
+            raise ValueError("Tool results do not match the pending tool calls.")
+
+        output_items = [
+            {
+                "type": "function_call_output",
+                "call_id": result.tool_call_id,
+                "output": dumps(
+                    result.output,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            }
+            for result in tool_results
+        ]
+        input_items = cast(
+            ResponseInputParam,
+            [
+                *turn.state.input_items,
+                *output_items,
+            ],
+        )
+
+        return await self._create_turn(
+            turn.state.request,
+            input_items,
+        )
+
+    async def generate(
+        self,
+        request: LLMRequest,
+    ) -> LLMResponse:
+        turn = await self.start_turn(request)
+        return turn.response

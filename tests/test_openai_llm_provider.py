@@ -21,6 +21,7 @@ from atlas_agent_platform.llm.schemas import (
 from atlas_agent_platform.tools.builtin.calculator import (
     CalculatorTool,
 )
+from atlas_agent_platform.tools.schemas import ToolResult
 
 
 @pytest.fixture
@@ -268,3 +269,108 @@ async def test_openai_provider_returns_tool_calls(
         "left": 6,
         "right": 7,
     }
+
+@pytest.mark.anyio
+async def test_openai_provider_replays_tool_turn(
+    provider: OpenAILLMProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    definition = CalculatorTool().definition
+    sdk_tool_call = ResponseFunctionToolCall(
+        arguments='{"operation":"multiply","left":6,"right":7}',
+        call_id="call_123",
+        name="calculator",
+        type="function_call",
+    )
+    first_sdk_response = SimpleNamespace(
+        model="test-model",
+        output_text="",
+        output=[sdk_tool_call],
+        incomplete_details=None,
+        usage=SimpleNamespace(
+            input_tokens=10,
+            output_tokens=5,
+        ),
+    )
+    final_sdk_response = SimpleNamespace(
+        model="test-model",
+        output_text="6 times 7 equals 42.",
+        output=[],
+        incomplete_details=None,
+        usage=SimpleNamespace(
+            input_tokens=8,
+            output_tokens=4,
+        ),
+    )
+    create_response = AsyncMock(
+        side_effect=[
+            first_sdk_response,
+            final_sdk_response,
+        ]
+    )
+
+    monkeypatch.setattr(
+        provider._client.responses,
+        "create",
+        create_response,
+    )
+
+    request = LLMRequest(
+        messages=[
+            ChatMessage(
+                role="user",
+                content="Calculate 6 times 7.",
+            ),
+        ],
+        tools=[definition],
+        max_output_tokens=128,
+    )
+
+    first_turn = await provider.start_turn(request)
+    tool_result = ToolResult(
+        tool_call_id="call_123",
+        name="calculator",
+        output={"result": 42.0},
+    )
+    final_turn = await provider.continue_turn(
+        first_turn,
+        [tool_result],
+    )
+
+    assert create_response.await_count == 2
+
+    first_request = (
+        create_response.await_args_list[0].kwargs
+    )
+    continued_request = (
+        create_response.await_args_list[1].kwargs
+    )
+
+    assert first_request["input"] == [
+        {
+            "role": "user",
+            "content": "Calculate 6 times 7.",
+        },
+    ]
+
+    continued_input = continued_request["input"]
+    assert len(continued_input) == 3
+    assert continued_input[0] == first_request["input"][0]
+    assert continued_input[1] is sdk_tool_call
+    assert continued_input[2] == {
+        "type": "function_call_output",
+        "call_id": "call_123",
+        "output": '{"result":42.0}',
+    }
+
+    assert continued_request["model"] == "test-model"
+    assert continued_request["tools"] == first_request["tools"]
+    assert continued_request["store"] is False
+    assert continued_request["stream"] is False
+
+    assert first_turn.response.finish_reason == "tool_call"
+    assert final_turn.response.finish_reason == "stop"
+    assert final_turn.response.content == (
+        "6 times 7 equals 42."
+    )
+    assert final_turn.response.tool_calls == []
