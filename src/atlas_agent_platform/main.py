@@ -5,6 +5,7 @@ from atlas_agent_platform.core.exception_handlers import (
     llm_provider_error_handler,
 )
 from atlas_agent_platform.llm.exceptions import LLMProviderError
+from atlas_agent_platform.routes.agents import router as agents_router
 from atlas_agent_platform.routes.health import router as health_router
 from atlas_agent_platform.routes.llm import router as llm_router
 
@@ -21,6 +22,7 @@ app.add_exception_handler(
     llm_provider_error_handler,
 )
 
+app.include_router(agents_router)
 app.include_router(health_router)
 app.include_router(llm_router)
 

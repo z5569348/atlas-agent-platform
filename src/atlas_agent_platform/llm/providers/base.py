@@ -1,6 +1,6 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from atlas_agent_platform.llm.capabilities import ModelCapabilities
 from atlas_agent_platform.llm.schemas import LLMRequest, LLMResponse
@@ -32,6 +32,7 @@ class LLMProvider(Protocol):
     ) -> LLMResponse: ...
 
 
+@runtime_checkable
 class AgentLLMProvider(LLMProvider, Protocol):
     async def start_turn(
         self,
